@@ -121,6 +121,7 @@ android {
             path "src/main/jni/Android.mk"
         }
     }
+    namespace 'com.limelight'
 }
 
 dependencies {

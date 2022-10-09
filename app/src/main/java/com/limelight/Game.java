@@ -1445,7 +1445,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             Log.v("samsungKey", motionEventActionToString(cursorActionApplied) + " | " + elapsedTime + " | " + event.getFlags());
 
             if (cursorActionApplied == MotionEvent.ACTION_HOVER_MOVE) {
-                if (elapsedTime > 150 && elapsedTime < 170 && previousGestureEvent == SamsungGesture.Click) {
+                if (elapsedTime > 145 && elapsedTime < 155 && previousGestureEvent == SamsungGesture.Click) {
                         conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
                         previousGestureEvent = SamsungGesture.Select;
                         previousGestureTimeEvent = eventTime;
