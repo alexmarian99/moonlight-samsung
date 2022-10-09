@@ -31,6 +31,7 @@ import com.limelight.ui.GameGestures;
 import com.limelight.ui.StreamView;
 import com.limelight.utils.Dialog;
 import com.limelight.utils.NetHelper;
+import com.limelight.utils.SamsungGesture;
 import com.limelight.utils.ServerHelper;
 import com.limelight.utils.ShortcutHelper;
 import com.limelight.utils.SpinnerDialog;
@@ -57,13 +58,17 @@ import android.net.ConnectivityManager;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.IBinder;
+import android.util.Log;
 import android.util.Rational;
 import android.view.Display;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.ScrollCaptureCallback;
+import android.view.ScrollCaptureSession;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.View;
@@ -84,6 +89,8 @@ import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.Locale;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 
 public class Game extends Activity implements SurfaceHolder.Callback,
@@ -189,7 +196,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
         // If we're going to use immersive mode, we want to have
         // the entire screen
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
             getWindow().getDecorView().setSystemUiVisibility(
                     View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
                     View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
@@ -1375,15 +1382,122 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         inputManager.toggleSoftInput(0, 0);
     }
 
+
+    // Previous state to create touchpad gestures
+    private int previousEventAction = 0;
+
+    // Previous gesture applied;
+    private SamsungGesture previousGestureEvent = SamsungGesture.None;
+    private long previousGestureTimeEvent = 0;
+
+    private short lastX = -1;
+    private short lastY = -1;
+
+    // DEBUG: test
+    private static String motionEventActionToString(int action) {
+        java.lang.reflect.Field fields[] = MotionEvent.class
+                .getDeclaredFields();//from  ww  w . j  a  va 2s .co  m
+        for (int iField = 0; iField < fields.length; ++iField) {
+            java.lang.reflect.Field field = fields[iField];
+            if (field.getType() == int.class
+                    && field.getName().startsWith("ACTION_")) {
+                try {
+                    if (field.getInt(null) == action)
+                        return field.getName();
+                } catch (IllegalAccessException e) {
+                }
+            }
+        }
+        return "(action " + action + " ???)";
+    }
+
     // Returns true if the event was consumed
     // NB: View is only present if called from a view callback
     private boolean handleMotionEvent(View view, MotionEvent event) {
+
         // Pass through keyboard input if we're not grabbing
         if (!grabbedInput) {
             return false;
         }
 
+        final int SAMSUNG_TOUCHPAD_CURSOR = 12290;
+
         int eventSource = event.getSource();
+
+        // Samsung keyboard cover touchpad interpretate
+        if (eventSource == SAMSUNG_TOUCHPAD_CURSOR) {
+            int cursorActionApplied = event.getActionMasked();
+            long eventTime = event.getEventTime();
+
+            // Samsung Touchpad Cursor position
+            short cursorPositionX = (short)event.getX();
+            short cursorPositionY = (short)event.getY();
+
+            // Screen display range
+            InputDevice device = event.getDevice();
+            InputDevice.MotionRange xRange = device.getMotionRange(MotionEvent.AXIS_X, eventSource);
+            InputDevice.MotionRange yRange = device.getMotionRange(MotionEvent.AXIS_Y, eventSource);
+            short xMax = (short)xRange.getMax();
+            short yMax = (short)yRange.getMax();
+
+            // Time between gestures
+            long elapsedTime = eventTime - previousGestureTimeEvent;
+            Log.v("samsungKey", motionEventActionToString(cursorActionApplied) + " | " + elapsedTime + " | " + event.getFlags());
+
+            if (cursorActionApplied == MotionEvent.ACTION_HOVER_MOVE) {
+                if (elapsedTime > 150 && elapsedTime < 170 && previousGestureEvent == SamsungGesture.Click) {
+                        conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
+                        previousGestureEvent = SamsungGesture.Select;
+                        previousGestureTimeEvent = eventTime;
+                    }
+                conn.sendMousePosition(cursorPositionX, cursorPositionY, xMax, yMax);
+            }
+            else if (cursorActionApplied == MotionEvent.ACTION_UP) {
+                if (previousEventAction == MotionEvent.ACTION_DOWN && (previousGestureEvent != SamsungGesture.RightClick || elapsedTime > 100)) {
+                    conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
+                    conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
+                    previousGestureEvent = previousGestureEvent == SamsungGesture.Click && elapsedTime < 200 ? SamsungGesture.DoubleClick : SamsungGesture.Click;
+                    previousGestureTimeEvent = eventTime;
+                }
+                else if (previousGestureEvent == SamsungGesture.Scroll) {
+                    lastY = -1;
+                    previousGestureEvent = SamsungGesture.None;
+                }
+                else if (previousEventAction == MotionEvent.ACTION_MOVE) {
+                    conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
+                    previousGestureEvent = SamsungGesture.None;
+                }
+            }
+            else if (cursorActionApplied == MotionEvent.ACTION_MOVE) {
+                if (event.getFlags() == 268435520) {
+                    if (lastY != -1) {
+                        conn.sendMouseHighResScroll((short)(cursorPositionY - lastY));
+                    }
+                    lastY = cursorPositionY;
+                    previousGestureEvent = SamsungGesture.Scroll;
+                    previousGestureTimeEvent = eventTime;
+                }
+                else if (previousEventAction == MotionEvent.ACTION_DOWN) {
+                    conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
+                    previousGestureEvent = SamsungGesture.Select;
+                    previousGestureTimeEvent = eventTime;
+                }
+                else {
+                    conn.sendMousePosition(cursorPositionX, cursorPositionY, xMax, yMax);
+                }
+            }
+            else if (cursorActionApplied == MotionEvent.ACTION_BUTTON_PRESS) {
+                conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_RIGHT);
+            }
+            else if (cursorActionApplied == MotionEvent.ACTION_BUTTON_RELEASE) {
+                conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_RIGHT);
+                previousGestureEvent = SamsungGesture.RightClick;
+                previousGestureTimeEvent = eventTime;
+            }
+            previousEventAction = cursorActionApplied;
+            return true;
+        }
+
         if ((eventSource & InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {
             if (controllerHandler.handleMotionEvent(event)) {
                 return true;
@@ -1403,6 +1517,12 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                                     event.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER)) ||
                     eventSource == 12290) // 12290 = Samsung DeX mode desktop mouse
             {
+                if (eventSource == 12290) {
+                    if (event.getActionMasked() == MotionEvent.ACTION_BUTTON_RELEASE) {
+                        return false;
+                    }
+                }
+
                 int buttonState = event.getButtonState();
                 int changedButtons = buttonState ^ lastButtonState;
 
@@ -1410,6 +1530,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 // but doesn't send BUTTON_PRIMARY for a regular click. Instead it sends ACTION_DOWN/UP,
                 // so we need to fix that up to look like a sane input event to process it correctly.
                 if (eventSource == 12290) {
+
                     if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
                         buttonState |= MotionEvent.BUTTON_PRIMARY;
                     }
@@ -1421,7 +1542,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                         // so be sure to add that bit back into the button state.
                         buttonState |= (lastButtonState & MotionEvent.BUTTON_PRIMARY);
                     }
-
                     changedButtons = buttonState ^ lastButtonState;
                 }
 
