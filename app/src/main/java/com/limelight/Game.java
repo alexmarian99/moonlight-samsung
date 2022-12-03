@@ -767,6 +767,12 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         // With Android native pointer capture, capture is lost when focus is lost,
         // so it must be requested again when focus is regained.
         inputCaptureProvider.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            inputCaptureProvider.enableCapture();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                streamView.requestPointerCapture();
+            }
+        }
     }
 
     private boolean isRefreshRateEqualMatch(float refreshRate) {
@@ -1139,9 +1145,15 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         public void run() {
             if (grabbedInput) {
                 inputCaptureProvider.disableCapture();
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    streamView.releasePointerCapture();
+                }
             }
             else {
                 inputCaptureProvider.enableCapture();
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    streamView.requestPointerCapture();
+                }
             }
 
             grabbedInput = !grabbedInput;
@@ -1395,7 +1407,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
 
     // Previous state to create touchpad gestures
-    private int previousEventAction = 0;
+    private int previousEventAction = -1;
+    private short repetedEventAction = 0;
+    private boolean captureCompletely = false;
 
     // Previous gesture applied;
     private SamsungGesture previousGestureEvent = SamsungGesture.None;
@@ -1431,7 +1445,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             return false;
         }
 
-        final int SAMSUNG_TOUCHPAD_CURSOR = 12290;
+        final int SAMSUNG_TOUCHPAD_CURSOR = 1048584;
 
         int eventSource = event.getSource();
 
@@ -1442,71 +1456,74 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
             // Samsung Touchpad Cursor position
             short cursorPositionX = (short)event.getX();
-            short cursorPositionY = (short)event.getY();
 
             // Screen display range
             InputDevice device = event.getDevice();
             InputDevice.MotionRange xRange = device.getMotionRange(MotionEvent.AXIS_X, eventSource);
             InputDevice.MotionRange yRange = device.getMotionRange(MotionEvent.AXIS_Y, eventSource);
-            short xMax = (short)xRange.getMax();
-            short yMax = (short)yRange.getMax();
 
             // Time between gestures
             long elapsedTime = eventTime - previousGestureTimeEvent;
-            Log.v("samsungKey", motionEventActionToString(cursorActionApplied) + " | " + elapsedTime + " | " + event.getFlags());
-
-            if (cursorActionApplied == MotionEvent.ACTION_HOVER_MOVE) {
-                if (elapsedTime > 145 && elapsedTime < 160 && previousGestureEvent == SamsungGesture.Click) {
-                        conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
-                        previousGestureEvent = SamsungGesture.Select;
-                        previousGestureTimeEvent = eventTime;
+//            Log.v("samsungKey", motionEventActionToString(cursorActionApplied) + " | " + elapsedTime + " | " + event.getFlags());
+            if (previousEventAction != -1) {
+                if (cursorActionApplied == MotionEvent.ACTION_UP) {
+                    if (previousEventAction == MotionEvent.ACTION_DOWN || (previousEventAction == MotionEvent.ACTION_MOVE && repetedEventAction == 1))
+                    {
+                        if (previousGestureEvent != SamsungGesture.Select) {
+                            conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
+                            conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
+                            previousGestureEvent = SamsungGesture.Click;
+                            previousGestureTimeEvent = eventTime;
+                        }
                     }
-                conn.sendMousePosition(cursorPositionX, cursorPositionY, xMax, yMax);
-            }
-            else if (cursorActionApplied == MotionEvent.ACTION_UP) {
-                if (previousEventAction == MotionEvent.ACTION_DOWN && (previousGestureEvent != SamsungGesture.RightClick || elapsedTime > 100)) {
-                    conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
-                    conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
-                    previousGestureEvent = previousGestureEvent == SamsungGesture.Click && elapsedTime < 200 ? SamsungGesture.DoubleClick : SamsungGesture.Click;
+                    if (previousGestureEvent == SamsungGesture.Select) {
+                        conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
+                        previousGestureEvent = SamsungGesture.None;
+                    }
+                    previousEventAction = -1;
+                    repetedEventAction = 0;
+                }
+                if (cursorActionApplied == MotionEvent.ACTION_POINTER_UP) {
+                    if (previousEventAction == MotionEvent.ACTION_POINTER_DOWN || (previousEventAction == MotionEvent.ACTION_MOVE && repetedEventAction == 1))
+                    {
+                        conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_RIGHT);
+                        conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_RIGHT);
+                    }
+                    previousEventAction = -1;
+                    repetedEventAction = 0;
+                    previousGestureEvent = SamsungGesture.ScrollUp;
                     previousGestureTimeEvent = eventTime;
                 }
-                else if (previousGestureEvent == SamsungGesture.Scroll) {
-                    lastY = -1;
-                    previousGestureEvent = SamsungGesture.None;
-                }
-                else if (previousEventAction == MotionEvent.ACTION_MOVE) {
-                    conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
-                    previousGestureEvent = SamsungGesture.None;
-                }
-            }
-            else if (cursorActionApplied == MotionEvent.ACTION_MOVE) {
-                if (event.getFlags() == 268435520) {
-                    if (lastY != -1) {
-                        conn.sendMouseHighResScroll((short)(cursorPositionY - lastY));
-                    }
-                    lastY = cursorPositionY;
+                if (cursorActionApplied == MotionEvent.ACTION_POINTER_DOWN) {
                     previousGestureEvent = SamsungGesture.Scroll;
-                    previousGestureTimeEvent = eventTime;
+                    lastX = cursorPositionX;
                 }
-                else if (previousEventAction == MotionEvent.ACTION_DOWN) {
-                    conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
-                    previousGestureEvent = SamsungGesture.Select;
-                    previousGestureTimeEvent = eventTime;
-                }
-                else {
-                    conn.sendMousePosition(cursorPositionX, cursorPositionY, xMax, yMax);
+                if (cursorActionApplied == MotionEvent.ACTION_MOVE) {
+                    if (previousGestureEvent == SamsungGesture.Scroll) {
+                        conn.sendMouseHighResScroll((short)(0 - (cursorPositionX - lastX)));
+                        captureCompletely = true;
+                        lastX = cursorPositionX;
+                    }
+                    if (previousGestureEvent == SamsungGesture.Click) {
+                        if (elapsedTime < 200)
+                        {
+                            conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
+                            previousGestureEvent = SamsungGesture.Select;
+                        }
+                    }
                 }
             }
-            else if (cursorActionApplied == MotionEvent.ACTION_BUTTON_PRESS) {
-                conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_RIGHT);
-            }
-            else if (cursorActionApplied == MotionEvent.ACTION_BUTTON_RELEASE) {
-                conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_RIGHT);
-                previousGestureEvent = SamsungGesture.RightClick;
-                previousGestureTimeEvent = eventTime;
+            if (previousEventAction == cursorActionApplied && repetedEventAction < 2) {
+                repetedEventAction += 1;
             }
             previousEventAction = cursorActionApplied;
-            return true;
+            if (cursorActionApplied == MotionEvent.ACTION_MOVE && previousGestureEvent == SamsungGesture.ScrollUp && elapsedTime > 60) {
+                captureCompletely = false;
+                previousGestureEvent = SamsungGesture.None;
+            }
+            if (captureCompletely) {
+                return true;
+            }
         }
 
         if ((eventSource & InputDevice.SOURCE_CLASS_JOYSTICK) != 0) {
@@ -1567,9 +1584,17 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 // dealing with a stylus without hover support, our position might be
                 // significantly different than before.
                 if (inputCaptureProvider.eventHasRelativeMouseAxes(event)) {
+                    short deltaX = 0;
+                    short deltaY = 0;
                     // Send the deltas straight from the motion event
-                    short deltaX = (short)inputCaptureProvider.getRelativeAxisX(event);
-                    short deltaY = (short)inputCaptureProvider.getRelativeAxisY(event);
+                    if (eventSource == 1048584) {
+                        deltaX = (short) (inputCaptureProvider.getRelativeAxisY(event) * 1.3);
+                        deltaY = (short) ((0 - inputCaptureProvider.getRelativeAxisX(event)) * 1.3);
+                    }
+                    else {
+                        deltaX = (short)inputCaptureProvider.getRelativeAxisX(event);
+                        deltaY = (short)inputCaptureProvider.getRelativeAxisY(event);
+                    }
 
                     if (deltaX != 0 || deltaY != 0) {
                         if (prefConfig.absoluteMouseMode) {
@@ -2124,6 +2149,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     @Override
                     public void run() {
                         inputCaptureProvider.enableCapture();
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            streamView.requestPointerCapture();
+                        }
                     }
                 }, 500);
 
