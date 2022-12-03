@@ -6,5 +6,6 @@ public enum SamsungGesture {
     RightClick,
     Select,
     Scroll,
-    ScrollUp
+    ScrollUp,
+    CursorMove
 }
